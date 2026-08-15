@@ -1,97 +1,100 @@
 # Patron Arts
 
-Patron Arts is a full stack e commerce website for a Kashmiri handmade carpet business. It lets people browse a catalog of carpets, filter and search through them, view a product with its available sizes and stock, create an account, add carpets to a cart and place an order. The whole application runs in Docker containers on a single virtual machine and is exposed to the internet through a Cloudflare Tunnel.
+A full stack e commerce application for a handmade carpet catalog, built to demonstrate a containerized multi service architecture running behind a reverse proxy on a single host. The application covers product browsing with filtering and search, token based authentication, a cart, and an order flow backed by a real database transaction. Every service runs in its own Docker container and the whole stack is orchestrated with Docker Compose.
 
-This project was built from scratch to learn how a real backend, database, frontend and reverse proxy fit together and how to containerize all of them.
+## Stack
 
-## What the application does
-
-A visitor lands on the home page and sees a grid of carpets pulled live from the database. They can filter by category such as Persian, Kashmiri, Turkish, Silk and Woolen, search carpets by name, sort by price or name, and open any carpet to see its full detail page. Each carpet has three sizes and every size has its own price and stock count.
-
-To buy something a visitor registers an account or logs in. Passwords are hashed before they are stored and a token is issued on login which the browser sends on every request that needs a logged in user. A logged in user can add a specific size of a carpet to their cart, change the cart, remove items and place an order. Placing an order runs a real database transaction that checks stock, records the order, freezes the price that was paid, reduces the stock and clears the cart.
-
-## Tech stack
-
-Backend is built with Node and Express in a layered structure of routes, controllers, models, middleware and config. PostgreSQL stores all the data. Redis is set up as a cache layer. The frontend is a React application built with Vite. Nginx sits in front as a reverse proxy and decides where each request goes. Everything is containerized with Docker and orchestrated with Docker Compose.
+Backend is Node with Express in a layered structure. PostgreSQL is the primary data store. Redis is wired in as a cache layer. Frontend is React built with Vite. Nginx is the reverse proxy and the single public entry point. Docker and Docker Compose containerize and orchestrate all of it.
 
 ## Architecture
 
-The browser only ever talks to Nginx. Nginx looks at the address of each request. Anything that starts with slash api is sent to the backend container. Everything else is sent to the frontend container. The backend talks to PostgreSQL for data and to Redis for caching. Only Nginx is exposed to the outside on port 80. The frontend and backend are not reachable directly from outside and are only reached through Nginx on the internal Docker network.
+The system runs as five containers on one Docker network. Nginx is the only container exposed to the outside world on port 80. Every request enters through Nginx which inspects the path and routes it. Requests to slash api are proxied to the backend container. Everything else is proxied to the frontend container that serves the static React build. The backend reaches PostgreSQL and Redis over the internal network by service name. The frontend and backend are never exposed directly, so the only surface reachable from outside is the proxy.
 
 ```
-Browser
-   |
- Nginx        (port 80, the only public entry)
-   |  \
-   |   \  /api goes to backend
-   |    \
- frontend   backend
-                |
-        PostgreSQL and Redis
+                 Browser
+                    |
+                  Nginx            port 80, sole public entry, reverse proxy
+                 /      \
+        path is /api     everything else
+             |                 |
+          backend           frontend
+             |             static React build
+     PostgreSQL   Redis
 ```
 
-## Containers
+Because containers resolve each other by service name on the Compose network, the backend connects to the database at host postgres and to the cache at host redis rather than at an address. The same code that runs against localhost during local development runs against those service names once containerized, and the only thing that changes is the environment configuration injected at run time.
 
-The stack runs five containers.
+## Request workflow
 
-nginx is the reverse proxy and the public entry point. It uses the official nginx image with a custom config file mounted in.
+A page request enters Nginx, is matched against the location blocks, and is proxied to the frontend which returns the built React files. The React app then issues data requests to paths under slash api. Those requests hit Nginx again, match the api location, and are proxied to the backend. The backend runs the request through its middleware and controller layers, queries PostgreSQL, and returns JSON. The React app renders the result. Requests that require an authenticated user carry a token in the authorization header which the backend verifies before the controller runs.
 
-frontend is the React application. It is built with a multi stage Dockerfile where the first stage compiles the React code into static files and the second stage serves those static files with a small nginx.
+## Backend layers
 
-backend is the Express API. It is built from its own Dockerfile.
+The backend separates concerns into distinct layers so each file has one job.
 
-postgres is the database. It uses the official postgres image with the schema file mounted in so the tables are created on first start.
+Routes map a method and a path to a handler and contain no logic.
 
-redis is the cache. It uses the official redis image.
+Controllers read the request, validate it, decide the status code, and shape the response. They call models but never write queries directly.
 
-## Database
+Models are the only layer that touches the database. They hold the raw SQL and return plain data.
 
-The database holds users, categories, products, product variants, product images, cart items, orders, order items, addresses, wishlist items and reviews. A product is one carpet. A variant is one size of that carpet with its own price and stock. An order item stores the price at the moment of purchase so past orders stay correct even if the carpet price changes later.
+Middleware runs before controllers on requests that need it. This covers token verification for protected routes, body parsing, and centralized error handling.
 
-## Running the project
+Config holds the PostgreSQL connection pool and the Redis client so every other file shares one connection source.
 
-The virtual machine needs Docker and Docker Compose installed.
+## Data model
 
-Bring the whole stack up from the project root.
+The schema separates a product from its purchasable variants. A product is one carpet with a base price and a category. A variant is one size of that carpet with its own price and its own stock count, which is how size selection with per size stock works. Product images are stored as rows that point to image paths, not as binary data. Orders and order items are separate, and an order item records the price at the moment of purchase so historical orders remain accurate even after a product price changes.
+
+## Order transaction
+
+Placing an order is the most involved operation because several tables change together and a partial change would corrupt state. The checkout runs inside a single database transaction. It reads the cart while locking the affected variant rows, verifies stock for every item, computes the totals, writes the order, writes the order items with the frozen purchase price, decrements the stock, and clears the cart. If any step fails the whole transaction rolls back and nothing is written. Row locking during the read prevents two simultaneous checkouts from overselling the same stock.
+
+## Containers and images
+
+Two images are built from source in this repository. The backend image is a straightforward Node image that installs dependencies and runs the server. The frontend image is a multi stage build where the first stage compiles the React application into static assets and the second stage copies only those assets into a minimal serving image, so the final artifact carries no build tooling or source.
+
+Three images are pulled rather than built because they are standard software. Nginx uses the official image with a mounted configuration file. PostgreSQL uses the official image with the schema mounted into its init directory so tables are created on first boot with an empty volume. Redis uses the official image.
+
+Application data lives in a named Docker volume, not in any image, so the database survives container recreation. Configuration such as the schema and the Nginx routing rules is mounted at run time rather than baked into images, which keeps the images generic and portable.
+
+## Configuration and secrets
+
+The backend is configured entirely through environment variables covering the database connection, the cache connection, and the token signing secret. These are supplied by Docker Compose at run time. Secret values are never committed to the repository and never copied into an image, which is why the same image can run in any environment by supplying different configuration.
+
+## Running locally
+
+The host needs Docker and Docker Compose.
+
+Bring the full stack up from the project root.
 
 ```
 docker compose up -d
 ```
 
-Check that all five containers are running.
+Verify all five services are healthy.
 
 ```
 docker compose ps
 ```
 
-Load the sample carpet data into the database. This creates the categories, the products, their sizes and their images.
+Seed the catalog. This inserts categories, products, their variants, and their image references.
 
 ```
 cd backend
 node src/seed.js
 ```
 
-The site is then available on the machine on port 80.
+The application is then served on the host on port 80 through Nginx.
 
-## Making it public
+## Exposing the host
 
-The site is exposed to the internet with a Cloudflare Tunnel. A tunnel is started from the virtual machine pointing at the local Nginx on port 80. Cloudflare returns a public https address that anyone can open from any device. Cloudflare handles the https so no certificates need to be managed on the machine.
+The running stack is published to the internet with a Cloudflare Tunnel that points at the local Nginx on port 80. The tunnel is an outbound connection from the host to the Cloudflare edge, so no inbound port is opened on the network and the host address stays private. TLS is terminated at the edge, so the public endpoint is served over https while the internal traffic between the tunnel and Nginx stays plain http.
 
 ```
 cloudflared tunnel --url http://localhost:80
 ```
 
-## Images
+## Image handling
 
-Product images are stored as files in the frontend under public images. The database only stores the path to each image, not the image itself. When the site is served the browser requests each image from the frontend and it is served as a normal static file.
-
-## Environment variables
-
-The backend reads its database connection, its redis connection and its token secret from environment variables. These are supplied by Docker Compose when the backend runs as a container. Secret values are never committed to the repository and are never baked into any image.
-
-## Credits
-
-Owner Mohammad Shafi Mir
-Location Dalgate Srinagar Kashmir
-
-Built and containerized by Hadi Ali
+Product images are served as static files from the frontend build under public images. The database stores only the path to each image. When a page renders, the browser requests each image from the frontend and it is returned as a normal static asset, so no image data ever passes through the database or the API.
