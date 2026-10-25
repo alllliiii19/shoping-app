@@ -1,0 +1,50 @@
+services:
+  postgres:
+    image: postgres:18-alpine
+    container_name: postgres01
+    env_file:
+      - .env
+    volumes:
+      - postgres_data:/var/lib/postgresql
+      - ./schema.sql:/docker-entrypoint-initdb.d/schema.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d shopping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  redis:
+    image: redis:8-alpine
+    container_name: redis01
+    restart: unless-stopped
+
+  backend:
+    image: arexali777/patron-backend:${TAG:-latest}
+    container_name: backend01
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  frontend:
+    image: arexali777/patron-frontend:${TAG:-latest}
+    container_name: frontend01
+    restart: unless-stopped
+
+  nginx:
+    image: nginx:alpine
+    container_name: nginx01
+    ports:
+      - "127.0.0.1:8080:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf
+    depends_on:
+      - frontend
+      - backend
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
