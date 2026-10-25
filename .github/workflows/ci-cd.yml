@@ -61,3 +61,25 @@ jobs:
           tags: |
             ${{ env.DOCKER_USER }}/patron-frontend:latest
             ${{ env.DOCKER_USER }}/patron-frontend:${{ github.sha }}
+
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to EC2 over SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ubuntu
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            set -e
+            cd ~/shoping-app
+            git pull origin master
+            export TAG=${{ github.sha }}
+            docker compose -f docker-compose.prod.yml pull
+            docker compose -f docker-compose.prod.yml up -d
+            docker image prune -f
+            sleep 5
+            curl -fsS -o /dev/null http://127.0.0.1:8080 && echo "Deploy OK: $TAG"
